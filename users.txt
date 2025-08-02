@@ -1,0 +1,14 @@
+# Add usernames, one per line
+# Common usernames to test
+admin
+administrator
+mail
+postmaster
+test
+user
+info
+support
+noreply
+webmaster
+root
+guest
