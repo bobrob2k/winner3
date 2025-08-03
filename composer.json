@@ -1,0 +1,35 @@
+{
+    "name": "roundcube-smtp-logger",
+    "description": "PHP SMTP Logger with credential verification for Roundcube login capture",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "phpmailer/phpmailer": "^6.8"
+    },
+    "autoload": {
+        "psr-4": {
+            "RoundcubeLogger\\": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "scripts": {
+        "post-install-cmd": [
+            "echo 'PHPMailer installed successfully!'"
+        ],
+        "post-update-cmd": [
+            "echo 'Dependencies updated successfully!'"
+        ]
+    },
+    "authors": [
+        {
+            "name": "SMTP Logger",
+            "email": "admin@example.com"
+        }
+    ],
+    "license": "MIT"
+}
